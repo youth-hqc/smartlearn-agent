@@ -25,7 +25,9 @@ def extract_text(pdf_path):
 
     pages = []
     with pdfplumber.open(pdf_path) as pdf:
+        total = len(pdf.pages)
         for i, page in enumerate(pdf.pages, 1):
+            print(f"Extracting page {i}/{total}...")
             text = page.extract_text()
             if text:
                 pages.append(f"[Page {i}]\n{text.strip()}")
@@ -44,7 +46,7 @@ def build_prompt(pages, page_count):
 
 Summarise this document with exactly three sections:
 1. Overview — a short paragraph covering the main topic
-2. Key Points — a bullet list; every bullet MUST end with a [Page X] citation
+2. Key Points — exactly 3-5 bullets; every bullet MUST end with a [Page X] citation
 3. Limitations — caveats, missing context, or extraction limits
 
 Use ONLY information from the provided text. Do not invent facts."""
@@ -69,6 +71,7 @@ def ask_llm(prompt_text):
                 "content": (
                     "You are a precise research assistant. "
                     "Summarise ONLY from the provided text. "
+                    "Provide exactly 3-5 Key Points. "
                     "Every Key Point MUST end with a [Page X] citation. "
                     "Do not invent facts or add outside knowledge."
                 ),
