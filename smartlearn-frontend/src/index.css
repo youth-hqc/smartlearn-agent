@@ -1,0 +1,18 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #f4f7fb;
+  color: #172033;
+}
+
+main {
+  width: min(760px, calc(100% - 32px));
+  margin: 48px auto;
+}
