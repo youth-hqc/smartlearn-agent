@@ -23,10 +23,14 @@ function PdfPreview({ upload, activePage, previewKey }) {
     }
     let cancelled = false;
     const chatId = upload.chat_id || "day2-demo";
-    // Quick HEAD request to see if the PDF is still on the server
-    fetch(`${API}/documents/${encodeURIComponent(chatId)}/file`, { method: "HEAD" })
-      .then((res) => { if (!cancelled) setFileReady(res.ok); })
-      .catch(() => { if (!cancelled) setFileReady(false); });
+    // Quick check to see if the PDF is still on the server.
+    // Use GET with a tiny Range so we don't download the whole file.
+    fetch(`${API}/documents/${encodeURIComponent(chatId)}/file`, {
+      method: "GET",
+      headers: { "Range": "bytes=0-0" },
+    })
+      .then((res) => { if (!cancelled) setFileReady(res.ok || res.status === 206); })
+      .catch(() => { if (!cancelled) setFileReady(null); }); // null = assume ok, let iframe try
     return () => { cancelled = true; };
   }, [upload, previewKey]);
 
