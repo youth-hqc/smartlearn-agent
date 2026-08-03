@@ -1,10 +1,6 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { API } from "./api.js";
 
-/**
- * Build the backend PDF file URL for the current chat session.
- * Appends #page=N for in-PDF page jumps.
- */
 function getDocumentFileURL(chatId, page = 1) {
   return `${API}/documents/${encodeURIComponent(chatId)}/file#page=${page}`;
 }
@@ -12,12 +8,28 @@ function getDocumentFileURL(chatId, page = 1) {
 /**
  * PdfPreview — iframe-based PDF viewer that follows page citations.
  *
- * Props:
- *   upload      — the upload response object, or null
- *   activePage  — the page number to show
- *   previewKey  — bumps when a new file is uploaded (forces iframe remount)
+ * Before rendering the iframe we check whether the backend still has the
+ * uploaded file.  If the backend was restarted the in-memory document is
+ * gone, so we show a "re-upload" hint instead of the raw 404 JSON that
+ * would otherwise appear inside the iframe.
  */
 function PdfPreview({ upload, activePage, previewKey }) {
+  const [fileReady, setFileReady] = useState(null); // null=checking, true=ok, false=gone
+
+  useEffect(() => {
+    if (!upload) {
+      setFileReady(null);
+      return;
+    }
+    let cancelled = false;
+    const chatId = upload.chat_id || "day2-demo";
+    // Quick HEAD request to see if the PDF is still on the server
+    fetch(`${API}/documents/${encodeURIComponent(chatId)}/file`, { method: "HEAD" })
+      .then((res) => { if (!cancelled) setFileReady(res.ok); })
+      .catch(() => { if (!cancelled) setFileReady(false); });
+    return () => { cancelled = true; };
+  }, [upload, previewKey]);
+
   if (!upload) {
     return (
       <div className="preview-panel">
@@ -42,12 +54,23 @@ function PdfPreview({ upload, activePage, previewKey }) {
           📄 {upload.filename} — Page {activePage}
         </span>
       </div>
-      <iframe
-        key={previewKey}
-        src={url}
-        className="preview-iframe"
-        title="PDF Preview"
-      />
+
+      {fileReady === false ? (
+        <div className="preview-placeholder">
+          <div className="preview-placeholder-icon">🔄</div>
+          <p>PDF no longer available on the server</p>
+          <p className="preview-hint">
+            The backend may have restarted. Please re-upload the PDF.
+          </p>
+        </div>
+      ) : (
+        <iframe
+          key={previewKey}
+          src={url}
+          className="preview-iframe"
+          title="PDF Preview"
+        />
+      )}
     </div>
   );
 }
