@@ -4,3 +4,9 @@ python-multipart
 pypdf
 openai
 python-dotenv
+sentence-transformers
+faiss-cpu
+pandas
+numpy
+langchain-text-splitters
+ipykernel
