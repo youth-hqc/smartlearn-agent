@@ -1,4 +1,7 @@
-export const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+// In production (Railway) frontend + backend share the same domain,
+// so an empty string makes all requests relative.  For local dev set
+// VITE_API_URL=http://localhost:8000 in smartlearn-frontend/.env
+export const API = import.meta.env.VITE_API_URL || "";
 export const CHAT_ID = "day2-demo";
 
 async function readJSON(response) {
