@@ -5,7 +5,7 @@
 }
 
 body {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'Segoe UI', system-ui, -apple-system, 'Segoe UI Symbol', 'Noto Sans', sans-serif;
   background: #f5f6fa;
   color: #2d3436;
   margin: 0;

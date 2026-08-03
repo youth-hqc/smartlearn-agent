@@ -30,7 +30,11 @@ def clean_text(text: str) -> str:
 
     Removes null bytes, soft hyphens, repeated whitespace, and noisy
     line-break characters so downstream chunking sees predictable input.
+    Also handles PDF-injected annotation characters (footnote markers,
+    Unicode math symbols) that would otherwise appear as garbled text.
     """
+    import unicodedata
+
     if not text:
         return ""
 
@@ -38,11 +42,49 @@ def clean_text(text: str) -> str:
     text = text.replace("\x00", "")
 
     # Remove soft hyphens (U+00AD)
-    text = text.replace("­", "")
+    text = text.replace("\xad", "")
 
     # Normalize common PDF noise: vertical tabs, form feeds, carriage returns
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\v", "\n").replace("\f", "\n")
+
+    # --- Unicode normalisation for PDF math/annotation artifacts ---
+
+    # 1. Normalise to NFC so composed characters are consistent
+    text = unicodedata.normalize("NFC", text)
+
+    # 2. Insert a space before "stray" Greek breathing marks that are
+    #    actually PDF footnote / table-note markers (e.g.  ὑ1, ὑ2)
+    #    These are in the Greek Extended block (U+1F00–U+1FFF) when
+    #    they appear mid-word (lowercase letter before them).
+    text = re.sub(r"(?<=[a-z])([ἀ-῿])", r" \1", text)
+
+    # 2b. Also fix the digit-after-annotation merge: "ὑ1is" → "ὑ1 is"
+    text = re.sub(r"([ἀ-῿]\d+)([a-zA-Z])", r"\1 \2", text)
+
+    # 3. Replace non-breaking spaces (U+00A0) and other invisible
+    #    spacing characters with regular spaces
+    text = re.sub(r"[  -​  　]", " ", text)
+
+    # 4. Remove isolated Unicode private-use-area characters
+    #    (U+F000–U+FFFF) that some PDF fonts emit as placeholder glyphs
+    text = re.sub(r"[-￿]", "", text)
+
+    # 5. Trim Unicode math letters of isolated annotation markers
+    #    (single math-symbol chars on their own line add noise)
+    #    Keep lines that have at least one ASCII alphanumeric
+    lines = text.splitlines()
+    filtered: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Drop lines that are ONLY math symbols / Greek without any ASCII
+        if stripped and not re.search(r"[a-zA-Z0-9]", stripped):
+            if len(stripped) <= 3:
+                continue  # short annotation-only line — skip
+        filtered.append(line)
+    text = "\n".join(filtered)
+
+    # --- Whitespace normalisation ---
 
     # Collapse repeated whitespace (but keep single newlines)
     text = re.sub(r"[^\S\n]+", " ", text)
@@ -1276,7 +1318,12 @@ def build_grounded_user_prompt(
     parts.append("")
     parts.append(
         "Answer the question using only the retrieved evidence above. "
-        "Cite factual claims with [Page X]. "
+        "Write your answer in clear, well-structured paragraphs with "
+        "proper spacing between them. "
+        "Cite factual claims with [Page X] at the end of the relevant "
+        "sentence or paragraph. "
+        "If the evidence contains garbled or unreadable characters, "
+        "skip those and use the readable parts only. "
         "If the answer is not in the evidence, say that the document "
         "does not provide enough information. "
         "Never invent a page number."
@@ -1310,7 +1357,12 @@ def _call_llm_answer(prompt: str, answer_model: str = "tencent/hy3:free") -> str
                 "role": "system",
                 "content": (
                     "You answer questions only from the supplied evidence. "
-                    "Cite factual claims with [Page X]. "
+                    "Write answers in clear, well-structured paragraphs "
+                    "with blank lines between them for readability. "
+                    "Cite factual claims with [Page X] at the end of each "
+                    "relevant paragraph. "
+                    "If some evidence text contains garbled characters, "
+                    "skip it and use only the readable parts. "
                     "If the answer is not in the evidence, say that the "
                     "document does not provide enough information. "
                     "Never invent a page number."
