@@ -677,17 +677,43 @@ def relative_path_str(path, base=None):
     return str(path)
 
 
-def build_faiss_index(embeddings: "np.ndarray") -> "faiss.Index":  # noqa: F821
-    """Create a FAISS flat inner-product index from *embeddings*.
+def build_faiss_index(
+    embeddings: "np.ndarray",  # noqa: F821
+    index_type: str = "flat",
+    nlist: int | None = None,
+) -> "faiss.Index":  # noqa: F821
+    """Create a FAISS index from *embeddings*.
 
-    Because the embeddings are L2-normalized, inner-product search is
-    equivalent to cosine-similarity search.
+    Parameters
+    ----------
+    index_type : str
+        ``"flat"`` — brute-force exact search (default, best for <10K chunks).
+        ``"ivf"`` — inverted-file approximate search (faster for 10K+ chunks).
+    nlist : int or None
+        Number of IVF clusters.  Auto-computed as ``4 * sqrt(N)`` when None.
+
+    Because embeddings are L2-normalized, inner-product equals cosine similarity.
     """
     import faiss
     import numpy as np
 
     embeddings = np.asarray(embeddings, dtype=np.float32)
     dim = int(embeddings.shape[1])
+    n = embeddings.shape[0]
+
+    if index_type == "ivf" and n >= 100:
+        if nlist is None:
+            nlist = max(4, int(4 * np.sqrt(n)))
+        nlist = min(nlist, n // 2)  # can't have more clusters than data/2
+
+        quantizer = faiss.IndexFlatIP(dim)
+        index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+        index.train(embeddings)
+        index.add(embeddings)
+        index.nprobe = max(1, nlist // 10)  # search ~10% of clusters
+        return index
+
+    # Fall back to flat (exact) for small collections
     index = faiss.IndexFlatIP(dim)
     index.add(embeddings)
     return index
@@ -784,6 +810,118 @@ def keyword_set(text: str) -> set[str]:
     return set(tokens)
 
 
+# ---------------------------------------------------------------------------
+# BM25 sparse retriever (pure Python, no extra deps)
+# ---------------------------------------------------------------------------
+
+
+class BM25SparseRetriever:
+    """Pure-Python BM25 for keyword-precise retrieval.
+
+    BM25 excels at matching exact terms (like "Post-training" or "SmolLM3")
+    that dense embeddings sometimes miss.  No model inference — purely
+    CPU-based term-frequency math.
+    """
+
+    def __init__(self, chunks: list[dict], k1: float = 1.5, b: float = 0.75):
+        import math
+        import re
+        from collections import Counter
+
+        self.k1 = k1
+        self.b = b
+        self.chunks = chunks
+
+        # Tokenize each chunk
+        self._docs: list[list[str]] = []
+        for c in chunks:
+            tokens = re.findall(r"[a-zA-Z0-9]{2,}", c["text"].lower())
+            self._docs.append(tokens)
+
+        # Average document length
+        self._avgdl = sum(len(d) for d in self._docs) / max(1, len(self._docs))
+
+        # Document frequency (df) for IDF
+        df: dict[str, int] = Counter()
+        for doc in self._docs:
+            for token in set(doc):
+                df[token] += 1
+
+        N = len(self._docs)
+        self._idf: dict[str, float] = {}
+        for token, freq in df.items():
+            self._idf[token] = math.log(1 + (N - freq + 0.5) / (freq + 0.5))
+
+        # Term frequency per document
+        self._tf: list[Counter] = [Counter(doc) for doc in self._docs]
+        self._doc_len = [len(doc) for doc in self._docs]
+
+    def search(self, query: str, top_k: int = 60) -> list[tuple[int, float]]:
+        """Return top-k ``(chunk_index, bm25_score)`` pairs."""
+        import re
+
+        q_tokens = re.findall(r"[a-zA-Z0-9]{2,}", query.lower())
+        if not q_tokens:
+            return []
+
+        scores: list[tuple[int, float]] = []
+        for i, doc_tf in enumerate(self._tf):
+            score = 0.0
+            for token in q_tokens:
+                idf = self._idf.get(token, 0)
+                if idf == 0:
+                    continue
+                tf = doc_tf.get(token, 0)
+                if tf == 0:
+                    continue
+                # BM25 formula
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (
+                    1 - self.b + self.b * (self._doc_len[i] / self._avgdl)
+                )
+                score += idf * numerator / denominator
+            if score > 0:
+                scores.append((i, score))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:top_k]
+
+
+# ---------------------------------------------------------------------------
+# Query expansion (keyword-based, no LLM overhead)
+# ---------------------------------------------------------------------------
+
+
+def expand_query_variants(question: str) -> list[str]:
+    """Return a few keyword-focused query variants for better recall.
+
+    Generates short-form and keyword-only variants so a single question can
+    match chunks that use different phrasing.  No model calls — pure regex.
+    """
+    import re
+
+    variants = [question]
+
+    # Variant 1: strip common question prefixes
+    short = re.sub(
+        r"^(what is|which|who|where|when|why|how|name the|list the|describe|explain)\s+",
+        "",
+        question.strip(),
+        flags=re.IGNORECASE,
+    )
+    if short != question and len(short) > 8:
+        variants.append(short)
+
+    # Variant 2: extract capitalized terms and 4+ char words as keywords
+    caps = re.findall(r"[A-Z][a-zA-Z0-9+-]{2,}", question)
+    longs = re.findall(r"[a-zA-Z]{4,}", question.lower())
+    keywords = list(dict.fromkeys(caps + longs))  # dedup, keep order
+    if len(keywords) >= 2:
+        variants.append(" ".join(keywords[:8]))
+
+    return list(dict.fromkeys(variants))  # dedup, keep order
+
+
 def _ensure_query_model(
     model_name: str,
     device: str | None = None,
@@ -799,11 +937,24 @@ def search_bundle(
     candidate_pool: int = 60,
     batch_size: int = 1,
     history: list[dict] | None = None,
+    hybrid: bool = True,
+    bm25_weight: float = 0.15,
+    use_reranker: bool = False,
 ) -> list[dict]:
     """Search an in-memory index bundle and return top-k hits.
 
-    Each hit carries ``chunk_id``, ``page``, ``text``, and ``score``.
-    A small lexical-rerank step on the candidate pool improves keyword recall.
+    Parameters
+    ----------
+    hybrid : bool
+        When True (default), fuse BM25 keyword scores with FAISS dense scores.
+        The BM25 component catches exact-term matches that dense embeddings
+        may miss (e.g. "Post-training", "SmolLM3").
+    bm25_weight : float
+        Weight of BM25 in the hybrid score (0.0 = pure dense, 1.0 = pure BM25).
+    use_reranker : bool
+        When True, apply a lightweight cross-encoder reranker on the candidate
+        pool.  Adds ~100-200ms per query but significantly improves ranking.
+        Off by default to keep inference fast.
     """
     import numpy as np
 
@@ -811,34 +962,68 @@ def search_bundle(
     chunks = bundle["chunks"]
     model_name = bundle["manifest"]["model_name"]
 
+    # --- Build or reuse BM25 retriever ---
+    bm25 = None
+    if hybrid:
+        cache_key = ("bm25", id(chunks))
+        if cache_key not in _model_cache:
+            _model_cache[cache_key] = BM25SparseRetriever(chunks)
+        bm25 = _model_cache[cache_key]
+
+    # --- Dense retrieval (FAISS) — single original question only ---
     model = _ensure_query_model(model_name)
     q_vec = embed_texts(
-        [question], model=model, model_name=model_name, batch_size=batch_size
+        [question], model=model, model_name=model_name, batch_size=1
     )
-
-    # Retrieve a larger candidate pool first
     pool_size = min(candidate_pool, index.ntotal)
     scores, ids = index.search(q_vec, pool_size)
-    scores = scores[0]
-    ids = ids[0]
-
-    # Lexical boost: reward chunks that share keywords with the question
-    q_tokens = keyword_set(question)
-    boosted: list[tuple[int, float]] = []
-    for pos, idx in enumerate(ids):
+    dense_scores: dict[int, float] = {}
+    for pos, idx in enumerate(ids[0]):
         if idx < 0 or idx >= len(chunks):
             continue
-        base_score = float(scores[pos])
-        chunk_text = chunks[idx].get("text", "")
-        overlap = len(q_tokens & keyword_set(chunk_text))
-        # Small lexical bonus (at most 0.1)
-        lexical_bonus = min(overlap * 0.02, 0.1)
-        boosted.append((int(idx), base_score + lexical_bonus))
+        dense_scores[idx] = float(scores[0][pos])
 
-    boosted.sort(key=lambda x: x[1], reverse=True)
+    # --- BM25 retrieval — use expanded variants for better recall ---
+    bm25_scores: dict[int, float] = {}
+    if bm25 is not None:
+        variants = expand_query_variants(question)
+        for variant in variants:
+            for idx, score in bm25.search(variant, top_k=pool_size):
+                if idx not in bm25_scores or score > bm25_scores[idx]:
+                    bm25_scores[idx] = score
+        # Min-max normalise BM25 scores into ~[0,1]
+        if bm25_scores:
+            vals = list(bm25_scores.values())
+            bmin, bmax = min(vals), max(vals)
+            if bmax > bmin:
+                bm25_scores = {
+                    k: (v - bmin) / (bmax - bmin) for k, v in bm25_scores.items()
+                }
 
+    # --- Fuse dense + BM25 ---
+    # Dense scores are cosine-similarity (~0 to ~1).  BM25 scores are
+    # min-max normalised to [0,1].  Linear combination with a small BM25
+    # weight fixes exact-term misses without distorting semantic ranking.
+    fused: list[tuple[int, float]] = []
+    all_ids = set(dense_scores.keys()) | set(bm25_scores.keys())
+    for idx in all_ids:
+        d_score = dense_scores.get(idx, 0.0)
+        if hybrid and bm25 is not None:
+            b_score = bm25_scores.get(idx, 0.0)
+            combined = (1 - bm25_weight) * d_score + bm25_weight * b_score
+        else:
+            combined = d_score
+        fused.append((idx, combined))
+
+    fused.sort(key=lambda x: x[1], reverse=True)
+
+    # --- Optional cross-encoder rerank on top candidates ---
+    if use_reranker:
+        fused = _rerank_candidates(question, chunks, fused[:candidate_pool])
+
+    # --- Build final hits ---
     hits: list[dict] = []
-    for idx, score in boosted[:top_k]:
+    for idx, score in fused[:top_k]:
         chunk = chunks[idx]
         hits.append(
             {
@@ -851,14 +1036,60 @@ def search_bundle(
     return hits
 
 
+def _rerank_candidates(
+    question: str,
+    chunks: list[dict],
+    candidates: list[tuple[int, float]],
+) -> list[tuple[int, float]]:
+    """Lightweight cross-encoder rerank of a candidate pool.
+
+    Uses ``ms-marco-MiniLM-L-6-v2`` (~80 MB) — adds ~100 ms per query but
+    dramatically improves ranking quality.  The model is cached after first load.
+    """
+    cache_key = ("cross_encoder",)
+    if cache_key not in _model_cache:
+        try:
+            from sentence_transformers import CrossEncoder
+
+            _model_cache[cache_key] = CrossEncoder(
+                "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
+        except ImportError:
+            # sentence-transformers already required; this should not fail
+            return candidates
+        except Exception:
+            return candidates
+
+    reranker = _model_cache[cache_key]
+    pairs = [(question, chunks[idx]["text"]) for idx, _ in candidates]
+    try:
+        ce_scores = reranker.predict(pairs, show_progress_bar=False)
+    except Exception:
+        return candidates
+
+    # Replace scores with cross-encoder scores
+    reranked = [
+        (candidates[i][0], float(ce_scores[i])) for i in range(len(candidates))
+    ]
+    reranked.sort(key=lambda x: x[1], reverse=True)
+    return reranked
+
+
 def search_document(
     question: str,
     document: dict,
     top_k: int = 3,
     candidate_pool: int = 60,
     history: list[dict] | None = None,
+    hybrid: bool = True,
+    bm25_weight: float = 0.15,
+    use_reranker: bool = False,
 ) -> list[dict]:
-    """Load the saved FAISS index from *document* and return top-k hits."""
+    """Load the saved FAISS index from *document* and return top-k hits.
+
+    See :func:`search_bundle` for the *hybrid*, *bm25_weight*, and
+    *use_reranker* parameter docs.
+    """
     index_path = document.get("artifacts", {}).get("index")
     if index_path is None:
         raise ValueError("document record is missing 'artifacts.index'")
@@ -874,7 +1105,14 @@ def search_document(
         },
     }
     return search_bundle(
-        question, bundle, top_k=top_k, candidate_pool=candidate_pool, history=history
+        question,
+        bundle,
+        top_k=top_k,
+        candidate_pool=candidate_pool,
+        history=history,
+        hybrid=hybrid,
+        bm25_weight=bm25_weight,
+        use_reranker=use_reranker,
     )
 
 
@@ -1090,6 +1328,9 @@ def answer_document(
     top_k: int = 3,
     candidate_pool: int = 60,
     answer_model: str = "tencent/hy3:free",
+    hybrid: bool = True,
+    bm25_weight: float = 0.15,
+    use_reranker: bool = False,
 ) -> dict:
     """Run retrieval + answer generation for one question.
 
@@ -1097,7 +1338,13 @@ def answer_document(
     Falls back to local sentence extraction when the API key is missing.
     """
     hits = search_document(
-        question, document, top_k=top_k, candidate_pool=candidate_pool
+        question,
+        document,
+        top_k=top_k,
+        candidate_pool=candidate_pool,
+        hybrid=hybrid,
+        bm25_weight=bm25_weight,
+        use_reranker=use_reranker,
     )
 
     try:
@@ -1141,6 +1388,9 @@ def answer_document_turn(
     top_k: int = 3,
     candidate_pool: int = 60,
     answer_model: str = "tencent/hy3:free",
+    hybrid: bool = True,
+    bm25_weight: float = 0.15,
+    use_reranker: bool = False,
 ) -> dict:
     """Answer one question and update the in-memory history.
 
@@ -1152,6 +1402,9 @@ def answer_document_turn(
         top_k=top_k,
         candidate_pool=candidate_pool,
         answer_model=answer_model,
+        hybrid=hybrid,
+        bm25_weight=bm25_weight,
+        use_reranker=use_reranker,
     )
     history = append_history(document, question, result)
     result["history"] = history
@@ -1164,6 +1417,9 @@ def answer_chat_turn(
     top_k: int = 3,
     candidate_pool: int = 60,
     answer_model: str = "tencent/hy3:free",
+    hybrid: bool = True,
+    bm25_weight: float = 0.15,
+    use_reranker: bool = False,
 ) -> dict:
     """Route-facing wrapper: retrieve evidence, answer, and update history.
 
@@ -1175,6 +1431,9 @@ def answer_chat_turn(
         top_k=top_k,
         candidate_pool=candidate_pool,
         answer_model=answer_model,
+        hybrid=hybrid,
+        bm25_weight=bm25_weight,
+        use_reranker=use_reranker,
     )
 
 
@@ -1271,7 +1530,12 @@ def evaluate_questions(
             continue
 
         hits = search_document(
-            question, document, top_k=top_k, candidate_pool=candidate_pool
+            question,
+            document,
+            top_k=top_k,
+            candidate_pool=candidate_pool,
+            hybrid=True,
+            bm25_weight=0.15,
         )
         answer = best_sentence_answer(question, hits)
 
