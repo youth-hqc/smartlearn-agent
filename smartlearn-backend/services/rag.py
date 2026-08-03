@@ -1333,17 +1333,18 @@ def build_grounded_user_prompt(
 
 
 def _call_llm_answer(prompt: str, answer_model: str = "tencent/hy3:free") -> str:
-    """Call the LLM via OpenRouter to produce an answer from the grounded prompt."""
+    """Call the LLM via OpenRouter to produce an answer from the grounded prompt.
+
+    Raises RuntimeError when OPENROUTER_API_KEY is missing so the caller
+    can fall back to local answer extraction.
+    """
     import os
-
-    from dotenv import load_dotenv
-    from openai import OpenAI
-
-    load_dotenv()
 
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
+
+    from openai import OpenAI
 
     client = OpenAI(
         api_key=api_key,

@@ -134,8 +134,30 @@ def chat(body: ChatRequest):
             top_k=3,
             candidate_pool=60,
         )
-    except Exception:
-        raise HTTPException(status_code=502, detail="Upstream AI service failed")
+    except RuntimeError as exc:
+        # Missing API key — return a helpful message, not a 502
+        if "OPENROUTER_API_KEY" in str(exc):
+            result = {
+                "answer": (
+                    "The AI answering service is not configured on this server. "
+                    "Please set the OPENROUTER_API_KEY environment variable "
+                    "in the Railway dashboard, then re-deploy.\n\n"
+                    "In the meantime, the system can still find relevant "
+                    "document passages but cannot generate natural-language answers."
+                ),
+                "citations": [],
+                "sources": [],
+            }
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Answer generation failed: {exc}",
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Answer generation failed: {exc}",
+        )
 
     return {
         "answer": result["answer"],
