@@ -10,3 +10,4 @@ pandas
 numpy
 langchain-text-splitters
 ipykernel
+chromadb
