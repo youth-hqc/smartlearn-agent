@@ -1,7 +1,6 @@
-// In production (Railway) frontend + backend share the same domain,
-// so an empty string makes all requests relative.  For local dev set
-// VITE_API_URL=http://localhost:8000 in smartlearn-frontend/.env
-export const API = import.meta.env.VITE_API_URL || "";
+// Local dev:    VITE_API_URL=http://localhost:8000  (in .env)
+// Production:   VITE_API_URL=https://smartlearn-agent-production-ab50.up.railway.app  (Vercel env var)
+export const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 export const CHAT_ID = "day2-demo";
 
 async function readJSON(response) {
