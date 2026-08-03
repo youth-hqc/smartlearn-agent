@@ -10,11 +10,13 @@ async function readJSON(response) {
 export async function uploadPDF(file) {
   const formData = new FormData();
   formData.append("file", file);
-  const response = await fetch(`${API}/upload?chat_id=${encodeURIComponent(CHAT_ID)}`, {
-    method: "POST",
-    body: formData,
-  });
-  return readJSON(response);
+  const response = await fetch(
+    `${API}/upload?chat_id=${encodeURIComponent(CHAT_ID)}`,
+    { method: "POST", body: formData },
+  );
+  const data = await readJSON(response);
+  // Attach chat_id so the preview component can build the file URL
+  return { ...data, chat_id: CHAT_ID };
 }
 
 export async function askQuestion(message) {

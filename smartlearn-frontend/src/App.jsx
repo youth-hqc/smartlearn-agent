@@ -1,11 +1,13 @@
 import React, { useState } from "react";
-import { uploadPDF, askQuestion } from "./api.js";
+import { uploadPDF } from "./api.js";
+import PdfPreview from "./PdfPreview.jsx";
+import ChatPanel from "./ChatPanel.jsx";
 
 function App() {
   const [file, setFile] = useState(null);
   const [upload, setUpload] = useState(null);
-  const [message, setMessage] = useState("");
-  const [answer, setAnswer] = useState(null);
+  const [activePage, setActivePage] = useState(1);
+  const [previewKey, setPreviewKey] = useState(0);
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
 
@@ -13,8 +15,10 @@ function App() {
     try {
       setStatus("uploading");
       setError("");
-      setAnswer(null);
+      setUpload(null);
       setUpload(await uploadPDF(fileToUpload));
+      setActivePage(1);                // reset to page 1
+      setPreviewKey((k) => k + 1);     // remount preview + chat
     } catch (e) {
       setError(e.message || "Upload failed");
     } finally {
@@ -22,16 +26,12 @@ function App() {
     }
   }
 
-  async function handleAsk(text) {
-    try {
-      setStatus("asking");
-      setError("");
-      setAnswer(await askQuestion(text));
-    } catch (e) {
-      setError(e.message || "Chat failed");
-    } finally {
-      setStatus("idle");
-    }
+  function handleJumpToPage(page) {
+    setActivePage(page);
+  }
+
+  function handleChatBusy(busy) {
+    setStatus(busy ? "asking" : "idle");
   }
 
   const isBusy = status !== "idle";
@@ -58,7 +58,7 @@ function App() {
           ) : (
             <>
               <span className="file-label">Click to choose a file</span>
-              <span className="file-hint">or drag and drop · PDF only · Max 30 pages</span>
+              <span className="file-hint">or drag and drop · PDF only</span>
             </>
           )}
           <input
@@ -89,39 +89,6 @@ function App() {
         )}
       </div>
 
-      {/* ====== Chat Card ====== */}
-      {upload && (
-        <div className="card">
-          <div className="card-title">
-            <span className="step">2</span> Ask a Question
-          </div>
-
-          <textarea
-            placeholder='e.g. "What is the main conclusion of this document?"'
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                if (message.trim() && !isBusy) handleAsk(message.trim());
-              }
-            }}
-          />
-
-          <button
-            className="btn btn-primary"
-            disabled={!message.trim() || isBusy}
-            onClick={() => handleAsk(message.trim())}
-          >
-            {status === "asking" ? (
-              <><span className="spinner" /> Thinking…</>
-            ) : (
-              "Ask Question"
-            )}
-          </button>
-        </div>
-      )}
-
       {/* ====== Error ====== */}
       {error && (
         <div className="error-banner" role="alert">
@@ -130,22 +97,21 @@ function App() {
         </div>
       )}
 
-      {/* ====== Answer ====== */}
-      {answer && (
-        <div className="answer-card">
-          <div className="answer-label">📝 Answer</div>
-          <div className="answer-text">{answer.answer}</div>
-
-          {answer.citations.length > 0 && (
-            <div className="citations-row">
-              <span className="citations-label">Sources</span>
-              {answer.citations.map((page) => (
-                <span className="page-chip" key={page}>
-                  📌 Page {page}
-                </span>
-              ))}
-            </div>
-          )}
+      {/* ====== Two-column workspace (preview + chat) ====== */}
+      {upload && (
+        <div className="workspace">
+          <PdfPreview
+            upload={upload}
+            activePage={activePage}
+            previewKey={previewKey}
+          />
+          <ChatPanel
+            key={previewKey}  // remount on new upload to clear old messages
+            enabled={!!upload}
+            onBusy={handleChatBusy}
+            disabled={isBusy}
+            onJumpToPage={handleJumpToPage}
+          />
         </div>
       )}
 

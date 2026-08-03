@@ -1453,6 +1453,71 @@ def extract_pages_from_bytes_for_rag(pdf_bytes: bytes) -> list[dict]:
     return records
 
 
+def prepare_rag_chat_record(
+    chat_id: str,
+    filename: str,
+    pdf_bytes: bytes | None = None,
+    pages: list[dict] | None = None,
+    upload_root=None,
+    chunk_mode: str = "character_overlap",
+    chunk_size: int = 700,
+    overlap: int = 120,
+    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    batch_size: int = 32,
+    artifact_root=None,
+) -> dict:
+    """Build a Day-3 ``documents[chat_id]`` record at upload time.
+
+    Saves the uploaded PDF bytes to disk, builds the RAG document
+    (chunks + FAISS index), and returns a server-ready record.
+    """
+    upload_root = Path(upload_root) if upload_root else Path("smartlearn-backend/uploads")
+    artifact_root = Path(artifact_root) if artifact_root else Path("smartlearn-backend/artifacts/rag")
+
+    # Save uploaded PDF
+    upload_root.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_root / f"{chat_id}.pdf"
+    if pdf_bytes:
+        saved_path.write_bytes(pdf_bytes)
+
+    # Extract pages from bytes or use provided pages
+    if pages is None and pdf_bytes is not None:
+        pages = extract_pages_from_bytes_for_rag(pdf_bytes)
+    elif pages is None:
+        raise ValueError("Either pdf_bytes or pages must be provided")
+
+    # Build the full RAG document
+    document = prepare_rag_document(
+        document_id=chat_id,
+        filename=filename,
+        pages=pages,
+        chunk_mode=chunk_mode,
+        chunk_size=chunk_size,
+        overlap=overlap,
+        model_name=model_name,
+        batch_size=batch_size,
+        artifact_root=artifact_root,
+    )
+
+    # Add upload-specific fields
+    document["chat_id"] = chat_id
+    document["saved_pdf_path"] = str(saved_path)
+
+    return document
+
+
+def build_upload_response(document: dict) -> dict:
+    """Return the visible upload-success JSON (Day 2 compatible shape)."""
+    pages = document.get("pages", [])
+    total_chars = sum(len(p.get("text", "")) for p in pages)
+    return {
+        "status": "ok",
+        "filename": document.get("filename", "unknown.pdf"),
+        "pages": len(pages),
+        "characters": total_chars,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 7. Evaluation helpers
 # ---------------------------------------------------------------------------
